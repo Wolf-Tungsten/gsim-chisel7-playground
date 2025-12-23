@@ -1,0 +1,9 @@
+[submodule "rocket-chip"]
+	path = rocket-chip
+	url = git@github.com:OpenXiangShan/rocket-chip.git
+[submodule "riscv-isa-sim"]
+	path = riscv-isa-sim
+	url = https://github.com/OpenXiangShan/riscv-isa-sim.git
+[submodule "riscv-arch-test"]
+	path = riscv-arch-test
+	url = https://github.com/OpenXiangShan/riscv-arch-test.git
