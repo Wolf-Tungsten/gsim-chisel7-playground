@@ -7,3 +7,6 @@
 [submodule "riscv-arch-test"]
 	path = riscv-arch-test
 	url = https://github.com/OpenXiangShan/riscv-arch-test.git
+[submodule "gsim"]
+	path = gsim
+	url = https://github.com/Wolf-Tungsten/gsim
