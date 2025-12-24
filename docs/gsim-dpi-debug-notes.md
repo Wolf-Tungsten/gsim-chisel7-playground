@@ -1,22 +1,77 @@
-# GSIM DPI-C 支持现状 & 定位打法（知识备份）
+# GSIM DPI-C 关键断点（mstatus/privilege）
 
-# GSIM DPI-C 支持现状 & 定位打法（知识备份）
+## 结论
+- reg 源 `cpu$ldut$tile_prci_domain$element_reset_domain$rockettile$core$csr$reg_mstatus$$prv` 与 EXT 端 `endpoint$module_6$dpic$io$$mstatus` 始终存在，链路在中途被两次剪掉。
+- 第一次：splitNodes 之后的 `removeDeadNodes` pass1 未保活 difftest 别名，删除 `csr$_io_difftest_privilegeMode_T`/`csr$io$$difftest$$privilegeMode`/`difftest_1$$privilegeMode`/`difftest_bundle_1$$privilegeMode`（`tmp-out/debug-dumps-pass1/gsim.log:119455-119458`，`gsim/src/deadNodes.cpp:85-93`）。此时 reg/EXT 仍在，但 difftest 段断链。
+- 第二次：ConstantAnalysis 将剩余 gateway/endpoint 别名视为常量并删除（`tmp-out/debug-dumps-pass1/gsim.log:314350-314362`，`gsim/src/constantNode.cpp` 内部 `removeNodes(CONSTANT_NODE)`）。此后仅剩 reg 与 EXT 输入，链路彻底断开。
+- pass1 删除原因：在 `AfterSplitNodes` 图中，这 4 个 difftest 别名只互相串联（reg_mstatus$$prv → csr$_io_difftest_privilegeMode_T → csr$io$$difftest$$privilegeMode → difftest_1$$privilegeMode → difftest_bundle_1$$privilegeMode），没有继续连接到 `difftest_packed_1/gatewayIn_packed_8_bore` 侧（无出边），导致从输出/EXT 种子回溯时不可达，故被 RemoveDeadNodes1 视为 dead。
+- 下游缺失说明：`difftest_bundle_1$$privilegeMode` 在 `AfterSplitNodes` 就没有任何出边（仅有一条入边来自 `difftest_1$$privilegeMode`，无消费者），`RemoveDeadNodes1` 时入边也被剪掉，导致该节点及其上游被视作孤立链路。
+- SplitNodes 对 `_difftest_packed_T_2` 的 OP_CAT 被折成单个 8bit `coreid`：`AfterSplitNodes` 中 `_difftest_packed_T_2`/`difftest_packed_1`/`gatewayIn_packed_8_bore` 的 assignTree 仅保留 8 位 coreid（其余 1152 位丢失）。这是因为 splitNodes 基于 usedBits/segment 判断该总线只有低 8 位被后续使用，自动裁剪掉其他 CAT 片段，导致 difftest 打包向下游只输出 8 位，也解释了下游链路被视为“无消费者”。需要复查 splitNodes 的 cut/segment 逻辑或 usedBits 种子，避免错误地认为 CAT 其他字段未被使用。
 
-## 现状梳理
-- FIRRTL: `DiffExt*` 以 `extmodule` + `DummyDPICWrapper` 形式存在，`enable` 由 `io.valid && control.enable && !reset` 驱动（例如 `tmp-out/SimTop.fir:119954+`）。
-- AST/Graph: GSIM 将 `extmodule` 解析为 `NODE_EXT`/`NODE_EXT_*`，在 `instsGenerator::computeExtMod` 中生成外部函数声明+调用（gsim/src/instsGenerator.cpp:1762-1814）。
-- C++ 模型: DiffExt 调用被插在生成的 `SimTop*.cpp` 中，所属 `SuperNode` 被标记为 `SUPER_EXTMOD` 并总是 active（gsim/src/cppEmitter.cpp，调用示例 rocket-chip/build/gsim-compile/model/SimTop2.cpp:22090）。
-- DPI 桥: `difftest-extmodule.cpp` 定义 `DiffExt*`，在 `enable` 为 1 时转调 `v_difftest_*`（rocket-chip/build/generated-src/difftest-extmodule.cpp:34-198）。`v_difftest_*` 写入 `diffstate_buffer`，在 `difftest_init` 中初始化（rocket-chip/build/generated-src/difftest-dpic.cpp:11-158；rocket-chip/difftest/src/test/csrc/difftest/difftest.cpp:36-59）。
-- 常量折叠: `NODE_EXT` 被视为有副作用，常量传播会保留其输入（gsim/src/constantNode.cpp:986+），因此输入本不应被优化掉。
+## 阶段存在性（tmp-out/debug-dumps-pass1）
+- `AfterSplitNodes`：链路完整（reg → difftest → gatewayIn → endpoint → dpic）。
+- `RemoveDeadNodes1`：difftest 四个别名缺失，其余仍在。
+- `ConstantAnalysis`：gateway/endpoint 侧别名缺失，只余 reg 与 EXT 输入。
 
-## 关键问题定位
-- enable 侧：插桩日志显示部分 DiffExt（TrapEvent/CSRState/ArchEvent/RegState）复位后能拉高，enable 逻辑非全失效。
-- 数据侧：TopoSort 阶段图中 mstatus 的实际链路存在——`gatewayIn_packed_8_bore -> gatewayIn$$8 -> endpoint$in$$8 -> ... -> endpoint$deltas$$6$$bits$$mstatus -> endpoint$module_6$io$$bits$$mstatus -> endpoint$module_6$dpic$io$$mstatus -> DiffExtCSRState`（边见 SimTop_1TopoSort.json）。
-- ConstantAnalysis 后（SimTop_2ConstantAnalysis.json）上游边 `endpoint$module_6$io$$bits$$mstatus -> endpoint$module_6$dpic$io$$mstatus` 消失，仅剩 dpic 输入直连 DiffExt；graphPartition/Final 同样如此，说明在 ConstantAnalysis/RemoveDeadNodes 阶段上游被裁剪。
-- 生成 C++ 中，`endpoint__DOT__module_6__DOT__dpic__DOT__io__DOT__mstatus` 每次激活都被置 0（SimTop2.cpp:19374-19381），无其他赋值，最终以 0 传给 DiffExtCSRState（22119 行）。其它 CSR 字段同理——上游被剪后 cppEmitter 清零悬空输入。
-- 结论：关键差异在数据流；ConstantAnalysis/RemoveDeadNodes 把 dpic 上游（mstatus 等）判为无效/常量，导致 EXT 输入被清零，REF 端看到全 0。
+## 复现命令
+`./gsim/build/gsim/gsim --dump-json --dump-assign-tree --dump-const-status --dump-stages=Init,TopoSort,AfterSplitNodes,RemoveDeadNodes,RemoveDeadNodes1,ConstantAnalysis --dir tmp-out/debug-dumps-pass1 --log-level=2 tmp-out/SimTop.fir`
 
-## 调试/分析打法
-- 阶段对比：使用 `--dump-stages=Init,TopoSort,ConstantAnalysis,...` 导出 JSON，对比关键信号边是否在 ConstantAnalysis 后被删除。
-- C++ 验证：查 `SimTop*.cpp` 中 dpic 输入是否只有清零语句；如无上游赋值，则数据流已断。
-- 保护措施思路：在 constantNode/removeDeadNodes 中特殊处理 EXT 输入，或确保 dpic enable/valid 不被推成常 0，避免上游被裁剪。
+## JSON确证
+
+cpu$ldut$tile_prci_domain$element_reset_domain$rockettile$core$_difftest_packed_T_2
+
+tmp-out/debug-dumps-pass1/SimTop_2RemoveDeadNodes.json
+```
+{"name": "cpu$ldut$tile_prci_domain$element_reset_domain$rockettile$core$_difftest_packed_T_2", "type": "NODE_OTHERS", "super": 17622, "assignTrees": [{"root": 0, "lvalue": 1, "nodes": [
+      {"id": 0, "op": "OP_CAT", "width": 1160, "sign": 0, "isClock": 0, "reset": 0, "children": [2, 3]},
+      {"id": 1, "op": "OP_EMPTY", "width": 1160, "sign": 0, "isClock": 0, "reset": 0, "node": "cpu$ldut$tile_prci_domain$element_reset_domain$rockettile$core$_difftest_packed_T_2", "children": []},
+      {"id": 2, "op": "OP_CAT", "width": 1152, "sign": 0, "isClock": 0, "reset": 0, "children": [4, 5]},
+      {"id": 3, "op": "OP_EMPTY", "width": 8, "sign": 0, "isClock": 0, "reset": 0, "node": "cpu$ldut$tile_prci_domain$element_reset_domain$rockettile$core$difftest_bundle_1$$coreid", "children": []},
+      {"id": 4, "op": "OP_CAT", "width": 1088, "sign": 0, "isClock": 0, "reset": 0, "children": [6, 7]},
+      {"id": 5, "op": "OP_EMPTY", "width": 64, "sign": 0, "isClock": 0, "reset": 0, "node": "cpu$ldut$tile_prci_domain$element_reset_domain$rockettile$core$difftest_bundle_1$$medeleg", "children": []},
+      {"id": 6, "op": "OP_CAT", "width": 1024, "sign": 0, "isClock": 0, "reset": 0, "children": [8, 9]},
+      {"id": 7, "op": "OP_EMPTY", "width": 64, "sign": 0, "isClock": 0, "reset": 0, "node": "cpu$ldut$tile_prci_domain$element_reset_domain$rockettile$core$difftest_bundle_1$$mideleg", "children": []},
+      {"id": 8, "op": "OP_CAT", "width": 960, "sign": 0, "isClock": 0, "reset": 0, "children": [10, 11]},
+      {"id": 9, "op": "OP_EMPTY", "width": 64, "sign": 0, "isClock": 0, "reset": 0, "node": "cpu$ldut$tile_prci_domain$element_reset_domain$rockettile$core$difftest_bundle_1$$sscratch", "children": []},
+      {"id": 10, "op": "OP_CAT", "width": 896, "sign": 0, "isClock": 0, "reset": 0, "children": [12, 13]},
+      {"id": 11, "op": "OP_EMPTY", "width": 64, "sign": 0, "isClock": 0, "reset": 0, "node": "cpu$ldut$tile_prci_domain$element_reset_domain$rockettile$core$difftest_bundle_1$$mscratch", "children": []},
+      {"id": 12, "op": "OP_CAT", "width": 832, "sign": 0, "isClock": 0, "reset": 0, "children": [14, 15]},
+      {"id": 13, "op": "OP_EMPTY", "width": 64, "sign": 0, "isClock": 0, "reset": 0, "node": "cpu$ldut$tile_prci_domain$element_reset_domain$rockettile$core$difftest_bundle_1$$mie", "children": []},
+      {"id": 14, "op": "OP_CAT", "width": 768, "sign": 0, "isClock": 0, "reset": 0, "children": [16, 17]},
+      {"id": 15, "op": "OP_EMPTY", "width": 64, "sign": 0, "isClock": 0, "reset": 0, "node": "cpu$ldut$tile_prci_domain$element_reset_domain$rockettile$core$difftest_bundle_1$$mip", "children": []},
+      {"id": 16, "op": "OP_CAT", "width": 704, "sign": 0, "isClock": 0, "reset": 0, "children": [18, 19]},
+      {"id": 17, "op": "OP_EMPTY", "width": 64, "sign": 0, "isClock": 0, "reset": 0, "node": "cpu$ldut$tile_prci_domain$element_reset_domain$rockettile$core$difftest_bundle_1$$satp", "children": []},
+      {"id": 18, "op": "OP_CAT", "width": 640, "sign": 0, "isClock": 0, "reset": 0, "children": [20, 21]},
+      {"id": 19, "op": "OP_EMPTY", "width": 64, "sign": 0, "isClock": 0, "reset": 0, "node": "cpu$ldut$tile_prci_domain$element_reset_domain$rockettile$core$difftest_bundle_1$$scause", "children": []},
+      {"id": 20, "op": "OP_CAT", "width": 576, "sign": 0, "isClock": 0, "reset": 0, "children": [22, 23]},
+      {"id": 21, "op": "OP_EMPTY", "width": 64, "sign": 0, "isClock": 0, "reset": 0, "node": "cpu$ldut$tile_prci_domain$element_reset_domain$rockettile$core$difftest_bundle_1$$mcause", "children": []},
+      {"id": 22, "op": "OP_CAT", "width": 512, "sign": 0, "isClock": 0, "reset": 0, "children": [24, 25]},
+      {"id": 23, "op": "OP_EMPTY", "width": 64, "sign": 0, "isClock": 0, "reset": 0, "node": "cpu$ldut$tile_prci_domain$element_reset_domain$rockettile$core$difftest_bundle_1$$stvec", "children": []},
+      {"id": 24, "op": "OP_CAT", "width": 448, "sign": 0, "isClock": 0, "reset": 0, "children": [26, 27]},
+      {"id": 25, "op": "OP_EMPTY", "width": 64, "sign": 0, "isClock": 0, "reset": 0, "node": "cpu$ldut$tile_prci_domain$element_reset_domain$rockettile$core$difftest_bundle_1$$mtvec", "children": []},
+      {"id": 26, "op": "OP_CAT", "width": 384, "sign": 0, "isClock": 0, "reset": 0, "children": [28, 29]},
+      {"id": 27, "op": "OP_EMPTY", "width": 64, "sign": 0, "isClock": 0, "reset": 0, "node": "cpu$ldut$tile_prci_domain$element_reset_domain$rockettile$core$difftest_bundle_1$$stval", "children": []},
+      {"id": 28, "op": "OP_CAT", "width": 320, "sign": 0, "isClock": 0, "reset": 0, "children": [30, 31]},
+      {"id": 29, "op": "OP_EMPTY", "width": 64, "sign": 0, "isClock": 0, "reset": 0, "node": "cpu$ldut$tile_prci_domain$element_reset_domain$rockettile$core$difftest_bundle_1$$mtval", "children": []},
+      {"id": 30, "op": "OP_CAT", "width": 256, "sign": 0, "isClock": 0, "reset": 0, "children": [32, 33]},
+      {"id": 31, "op": "OP_EMPTY", "width": 64, "sign": 0, "isClock": 0, "reset": 0, "node": "cpu$ldut$tile_prci_domain$element_reset_domain$rockettile$core$difftest_bundle_1$$sepc", "children": []},
+      {"id": 32, "op": "OP_CAT", "width": 192, "sign": 0, "isClock": 0, "reset": 0, "children": [34, 35]},
+      {"id": 33, "op": "OP_EMPTY", "width": 64, "sign": 0, "isClock": 0, "reset": 0, "node": "cpu$ldut$tile_prci_domain$element_reset_domain$rockettile$core$difftest_bundle_1$$mepc", "children": []},
+      {"id": 34, "op": "OP_CAT", "width": 128, "sign": 0, "isClock": 0, "reset": 0, "children": [36, 37]},
+      {"id": 35, "op": "OP_EMPTY", "width": 64, "sign": 0, "isClock": 0, "reset": 0, "node": "cpu$ldut$tile_prci_domain$element_reset_domain$rockettile$core$difftest_bundle_1$$sstatus", "children": []},
+      {"id": 36, "op": "OP_EMPTY", "width": 64, "sign": 0, "isClock": 0, "reset": 0, "node": "cpu$ldut$tile_prci_domain$element_reset_domain$rockettile$core$difftest_bundle_1$$privilegeMode", "children": []},
+      {"id": 37, "op": "OP_EMPTY", "width": 64, "sign": 0, "isClock": 0, "reset": 0, "node": "cpu$ldut$tile_prci_domain$element_reset_domain$rockettile$core$difftest_bundle_1$$mstatus", "children": []}
+    ]}]},
+```
+
+
+经过 SplitNodes 之后：
+
+
+tmp-out/debug-dumps-pass1/SimTop_3AfterSplitNodes.json
+```
+    {"name": "cpu$ldut$tile_prci_domain$element_reset_domain$rockettile$core$_difftest_packed_T_2", "type": "NODE_OTHERS", "super": 17622, "assignTrees": [{"root": 0, "lvalue": 1, "nodes": [
+      {"id": 0, "op": "OP_EMPTY", "width": 8, "sign": 0, "isClock": 0, "reset": 0, "node": "cpu$ldut$tile_prci_domain$element_reset_domain$rockettile$core$difftest_bundle_1$$coreid", "children": []},
+      {"id": 1, "op": "OP_EMPTY", "width": 1160, "sign": 0, "isClock": 0, "reset": 0, "node": "cpu$ldut$tile_prci_domain$element_reset_domain$rockettile$core$_difftest_packed_T_2", "children": []}
+    ]}]},
+```
