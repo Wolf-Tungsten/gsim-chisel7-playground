@@ -17,3 +17,7 @@
 - 生成的 GSIM C++ 模型中，这些 EXT 输入被每周期清零而未赋值：例如 `SimTop2.cpp:19374-19381` 将 `endpoint__DOT__module_6__DOT__dpic__DOT__io__DOT__mstatus` 置 0，文件内无其他赋值，最终以 0 传入 `DiffExtCSRState`（SimTop2.cpp:22119）。类似清零行为覆盖了 sstatus/mepc 等其他 CSR。
 - 推断：EXT 输入赋值在 instsGenerator/cppEmitter 中被裁剪或优化掉，导致 DiffExt 侧只看到常 0 数据，是 GSIM 与 Verilator 差异的关键原因。下一步需修复 EXT 输入的生成/保留逻辑。 
 
+### 边丢失佐证（TopoSort vs ConstantAnalysis）
+- TopoSort 阶段（SimTop_1TopoSort.json）存在上游边：`["endpoint$module_6$io$$bits$$mstatus", "endpoint$module_6$dpic$io$$mstatus"]` 以及 `["endpoint$module_6$dpic$io$$mstatus", "DiffExtCSRState"]`，可确认 mstatus 经 DummyDPICWrapper 进入 dpic。
+- ConstantAnalysis 之后（SimTop_2ConstantAnalysis.json）仅剩 `endpoint$module_6$dpic$io$$mstatus -> DiffExtCSRState`，上游 `endpoint$module_6$io$$bits$$mstatus` 节点与边已不存在，说明在 RemoveDeadNodes/ConstantAnalysis 流程中被认为“死或常量”并被裁剪。
+- 后续 graphPartition/Final 同样缺少这条上游边，对应生成 C++ 中 dpic 输入被清零（无驱动）。
