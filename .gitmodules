@@ -1,6 +1,6 @@
 [submodule "rocket-chip"]
 	path = rocket-chip
-	url = git@github.com:OpenXiangShan/rocket-chip.git
+	url = git@github.com:Wolf-Tungsten/rocket-chip.git
 [submodule "riscv-isa-sim"]
 	path = riscv-isa-sim
 	url = https://github.com/OpenXiangShan/riscv-isa-sim.git
