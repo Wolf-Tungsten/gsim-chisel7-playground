@@ -8,7 +8,7 @@ TEST_IMAGE ?= $(abspath ./riscv-arch-test/riscv-test-suite/build/I-add-01.bin)
 RISCV_TEST_BUILD_DIR ?= $(abspath ./riscv-arch-test/riscv-test-suite/build)
 RISCV_TEST_BINS := $(shell find $(RISCV_TEST_BUILD_DIR) -name '*.bin' -type f | sort)
 
-.PHONY: build-verilator-emu build-gsim-emu run-verilator-emu run-gsim-emu run-compare-logs run-batch-compare gsim-build clean
+.PHONY: build-verilator-emu build-gsim-emu run-verilator-emu run-gsim-emu run-compare-logs run-batch-compare gsim-build run-xs-gsim clean
 
 gsim-build:
 	@$(GSIM_MAKE) build-gsim
@@ -47,6 +47,9 @@ run-batch-compare: gsim-build build-gsim-emu build-verilator-emu
 		$(ENV_SETUP) ./rocket-chip/build/gsim-compile/emu -i $$bin > tmp-out/batch-compare/gsim/$${base}.log 2>&1 || true; \
 	done; \
 	echo "Batch compare logs stored under tmp-out/batch-compare"
+
+run-xs-gsim: gsim-build
+	@$(ENV_SETUP) NOOP_HOME=/workspace/gsim-chisel7-playground/XiangShan $(MAKE) -C XiangShan gsim-run GSIM=1 -j 30
 
 clean:
 	@$(RC_MAKE) clean
