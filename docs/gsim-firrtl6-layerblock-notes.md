@@ -18,6 +18,20 @@
   - `layerblock` 解析保持“无条件展开”行为（视为普通 `statements`，不阻断内部）。
 - 新增辅助非终结符 `intrinsic_extra`：递归消费 `, expr ...`，仅返回尾部表达式或空。
 
+## 示例：SimTop.fir:1447857 的 ifelsefatal 展开
+源 FIRRTL 片段（指向 `Bundles.scala:231` 的断言）：
+```
+layerblock Verification :
+  layerblock Assert :
+    intrinsic(circt_chisel_ifelsefatal<format = "ExceptionType receives input that is not one-hot: pf=%d, gpf=%d, af=%d, ill=%d, hwe=%d\n", label = "chisel3_builtin">,
+              clock, _exception_T_19, _exception_T_21, UInt<1>(0h0), UInt<1>(0h0), io.fromUncache.resp.bits.denied, UInt<1>(0h0), _exception_T_8)
+```
+gsim 解析流程（`gsim/parser/syntax.y:264-354`）：
+- `intrinsic_params` 读出 `<format = "...">`，用于后续断言消息。
+- 位置参数 `$6/$8/$10` 对应 `clock`、`predicate`、`enable`，生成 `newNode(P_ASSERT, …, $6, $8, $10)`，等价于普通 FIRRTL `assert(clock, predicate, enable, msg)`。
+- `intrinsic_extra` 吞掉 `enable` 之后的所有逗号分隔表达式（这里的 5 个 `%d` 实参），只为避免语法报错；这些值不会再拼回消息文本。
+- 因此生成的 P_ASSERT 只有时钟 / 条件 / 使能三元组，断言消息就是 `<format>` 字符串本身。
+
 ## 验证
 - 重建 gsim：`make gsim-build`（通过）。
 - `make run-xs-gsim`：解析 `SimTop.fir` 成功，日志显示多线程解析完成并进入后续优化阶段；整体生成因耗时在 CLI 侧超时，未见再出现语法错误。后续可在本地延长超时时间继续完成生成。

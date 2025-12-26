@@ -49,6 +49,7 @@ run-batch-compare: gsim-build build-gsim-emu build-verilator-emu
 	echo "Batch compare logs stored under tmp-out/batch-compare"
 
 run-xs-gsim: gsim-build
+	rm -rf XiangShan/build/gsim-compile
 	@$(ENV_SETUP) NOOP_HOME=/workspace/gsim-chisel7-playground/XiangShan $(MAKE) -C XiangShan gsim-run GSIM=1 -j 30
 
 clean:
